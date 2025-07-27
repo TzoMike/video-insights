@@ -1,50 +1,49 @@
 import streamlit as st
-import subprocess
+import openai
+import yt_dlp
 import os
 from pydub import AudioSegment
-import openai
-from fpdf import FPDF
 
-# 🔐 OpenAI API key
+# 🔐 OpenAI API Key
 openai.api_key = st.secrets["openai_api_key"]
 
-st.title("📽️ Instagram Reel AI Ανάλυση")
-st.write("Επικόλλησε ένα link από Instagram Reel για ανάλυση και μετάφραση!")
+# 🌟 Εμφάνιση τίτλου
+st.title("🎬 Video Analyzer AI")
+st.write("Δώσε link από YouTube, TikTok, Instagram και θα σου κάνουμε ανάλυση του περιεχομένου.")
 
-video_url = st.text_input("🔗 Εισάγετε Instagram Video Link")
+# 📥 URL input
+url = st.text_input("📎 Επικόλλησε το link του βίντεο:")
 
-if st.button("Ανάλυσε"):
-    if video_url:
-        st.info("📥 Λήψη ήχου...")
-        subprocess.run(["yt-dlp", "-f", "bestaudio", "-o", "video.mp4", video_url])
-        audio = AudioSegment.from_file("video.mp4")
-        audio.export("audio.wav", format="wav")
+if url:
+    try:
+        with st.spinner("📥 Κατέβασμα βίντεο..."):
+            video_filename = "video.mp4"
 
-        st.info("🔊 Μετατροπή σε κείμενο...")
-        with open("audio.wav", "rb") as file:
-            transcript = openai.Audio.transcribe("whisper-1", file)
+            # Ρυθμίσεις yt-dlp
+            ydl_opts = {
+                'format': 'mp4',
+                'outtmpl': video_filename,
+                'quiet': True,
+            }
 
-        st.subheader("📜 Transcript:")
-        st.write(transcript["text"])
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
 
-        st.info("📚 GPT Ανάλυση...")
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "Εξήγησε και μετάφρασε το περιεχόμενο του βίντεο στα ελληνικά."},
-                {"role": "user", "content": transcript["text"]}
-            ]
-        )
+        with st.spinner("🎧 Εξαγωγή ήχου..."):
+            audio = AudioSegment.from_file(video_filename)
+            audio.export("audio.wav", format="wav")
 
-        analysis = response.choices[0].message.content
-        st.subheader("🧠 Ανάλυση:")
-        st.write(analysis)
+        with st.spinner("🧠 Ανάλυση περιεχομένου..."):
+            with open("audio.wav", "rb") as f:
+                transcript = openai.Audio.transcribe("whisper-1", f)
 
-        if st.button("📄 Κατέβασέ το σε PDF"):
-            pdf = FPDF()
-            pdf.add_page()
-            pdf.set_font("Arial", size=12)
-            pdf.multi_cell(0, 10, analysis)
-            pdf.output("analysis.pdf")
-            with open("analysis.pdf", "rb") as f:
-                st.download_button("⬇️ Κατέβασμα PDF", f, file_name="analysis.pdf")
+            st.subheader("📋 Κείμενο από το βίντεο:")
+            st.write(transcript["text"])
+
+        # 🧹 Καθάρισμα προσωρινών αρχείων
+        os.remove("video.mp4")
+        os.remove("audio.wav")
+
+    except Exception as e:
+        st.error(f"⚠️ Κάτι πήγε στραβά: {e}")
+
