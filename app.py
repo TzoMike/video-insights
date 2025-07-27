@@ -3,13 +3,12 @@ from pytube import YouTube
 import os
 from pydub import AudioSegment
 import requests
+import time
 from fpdf import FPDF
 from googletrans import Translator
 from dotenv import load_dotenv
-import time
 
 load_dotenv()
-
 ASSEMBLYAI_API_KEY = st.secrets["ASSEMBLYAI_API_KEY"]
 
 st.set_page_config(page_title="Video Insights App")
@@ -19,21 +18,22 @@ st.title("🎥 Video Insights Analyzer")
 if "favorites" not in st.session_state:
     st.session_state.favorites = []
 
-# Language selection
+# Γλώσσες μετάφρασης & μεταγραφής
 lang_map = {
-    "Ελληνικά": "el",
-    "Αγγλικά": "en",
-    "Γαλλικά": "fr",
-    "Ισπανικά": "es",
-    "Γερμανικά": "de",
-    "Ινδικά": "hi",
-    "Κινέζικα": "zh-cn",
-    "Ρωσικά": "ru",
-    "Ολλανδικά": "nl",
-    "Αραβικά": "ar"
+    "Ελληνικά": ("el", "el"),
+    "Αγγλικά": ("en", "en"),
+    "Γαλλικά": ("fr", "fr"),
+    "Ισπανικά": ("es", "es"),
+    "Γερμανικά": ("de", "de"),
+    "Ινδικά": ("hi", "hi"),
+    "Κινεζικά": ("zh-cn", "zh"),
+    "Ρωσικά": ("ru", "ru"),
+    "Ολλανδικά": ("nl", "nl"),
+    "Αραβικά": ("ar", "ar"),
 }
-selected_language = st.selectbox("🌍 Γλώσσα Μετάφρασης", options=list(lang_map.keys()))
-target_lang = lang_map[selected_language]
+
+selected_language = st.selectbox("🌍 Επιλογή Γλώσσας Μετάφρασης & Αναγνώρισης", list(lang_map.keys()))
+target_lang, transcript_lang = lang_map[selected_language]
 
 def download_video(url):
     yt = YouTube(url)
@@ -49,46 +49,64 @@ def extract_audio():
         st.error(f"Σφάλμα εξαγωγής ήχου: {e}")
         return False
 
-def transcribe_audio():
+def transcribe_audio(language_code="en"):
     try:
-        upload_headers = {
+        # Upload audio
+        headers = {
             "authorization": ASSEMBLYAI_API_KEY,
-            "transfer-encoding": "chunked"
+            "content-type": "application/octet-stream"
         }
 
-        with open("audio.mp3", 'rb') as f:
-            upload_response = requests.post(
-                "https://api.assemblyai.com/v2/upload",
-                headers=upload_headers,
-                data=f
-            )
-        upload_response.raise_for_status()
-        upload_url = upload_response.json()['upload_url']
+        with open("audio.mp3", "rb") as f:
+            audio_data = f.read()
+
+        upload_response = requests.post(
+            "https://api.assemblyai.com/v2/upload",
+            headers=headers,
+            data=audio_data
+        )
+
+        if upload_response.status_code != 200:
+            st.error(f"Σφάλμα ανέβασματος ήχου: {upload_response.text}")
+            return ""
+
+        upload_url = upload_response.json()["upload_url"]
+
+        # Create transcript request
+        json_data = {
+            "audio_url": upload_url,
+            "language_code": language_code
+        }
 
         transcript_response = requests.post(
             "https://api.assemblyai.com/v2/transcript",
-            json={"audio_url": upload_url},
+            json=json_data,
             headers={"authorization": ASSEMBLYAI_API_KEY}
         )
-        transcript_response.raise_for_status()
-        transcript_id = transcript_response.json()['id']
 
-        # Wait for transcription to complete
-        status = 'queued'
-        polling_url = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
-        while status not in ['completed', 'error']:
-            polling = requests.get(polling_url, headers={"authorization": ASSEMBLYAI_API_KEY})
-            polling.raise_for_status()
-            polling_data = polling.json()
-            status = polling_data['status']
-            if status == 'processing':
-                time.sleep(3)
+        if transcript_response.status_code != 200:
+            st.error(f"Σφάλμα αιτήματος μεταγραφής: {transcript_response.text}")
+            return ""
 
-        if status == 'completed':
-            return polling_data['text']
+        transcript_id = transcript_response.json()["id"]
+
+        # Poll for result
+        status = "queued"
+        while status not in ("completed", "error"):
+            polling_response = requests.get(
+                f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
+                headers={"authorization": ASSEMBLYAI_API_KEY}
+            )
+            polling_data = polling_response.json()
+            status = polling_data["status"]
+            time.sleep(3)
+
+        if status == "completed":
+            return polling_data["text"]
         else:
             st.error("Η μεταγραφή απέτυχε.")
             return ""
+
     except Exception as e:
         st.error(f"Σφάλμα μετατροπής ήχου σε κείμενο: {e}")
         return ""
@@ -96,13 +114,14 @@ def transcribe_audio():
 def summarize_text(text):
     return text[:300] + "..." if len(text) > 300 else text
 
-def translate_text(text, dest_lang='el'):
+def translate_text(text, dest_lang="el"):
+    translator = Translator()
     try:
-        translator = Translator()
-        return translator.translate(text, dest=dest_lang).text
+        translated = translator.translate(text, dest=dest_lang)
+        return translated.text
     except Exception as e:
-        st.warning(f"Αποτυχία μετάφρασης: {e}")
-        return text
+        st.error(f"Σφάλμα μετάφρασης: {e}")
+        return ""
 
 def create_pdf(transcript, summary, translation):
     pdf = FPDF()
@@ -116,6 +135,7 @@ def create_pdf(transcript, summary, translation):
     with open("analysis.pdf", "rb") as f:
         st.download_button("⬇️ Κατέβασε ως PDF", f, file_name="analysis.pdf", mime="application/pdf")
 
+# Εισαγωγή URL
 url = st.text_input("📥 Επικόλλησε URL από YouTube")
 if st.button("Ανάλυση Βίντεο") and url:
     try:
@@ -127,7 +147,7 @@ if st.button("Ανάλυση Βίντεο") and url:
                 st.stop()
 
         with st.spinner("📝 Μετατροπή σε κείμενο..."):
-            transcript = transcribe_audio()
+            transcript = transcribe_audio(language_code=transcript_lang)
             if not transcript:
                 st.warning("Δεν βρέθηκε κείμενο.")
                 st.stop()
@@ -156,6 +176,7 @@ if st.button("Ανάλυση Βίντεο") and url:
     except Exception as e:
         st.error(f"Σφάλμα: {e}")
 
+# Προβολή αγαπημένων
 if st.session_state.favorites:
     st.subheader("📌 Αγαπημένα")
     for fav in st.session_state.favorites:
