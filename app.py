@@ -1,31 +1,28 @@
 import streamlit as st
-import openai
-import yt_dlp
 import os
+import yt_dlp
 from pydub import AudioSegment
+import openai
 
-# 🔐 OpenAI API Key
-openai.api_key = st.secrets["openai_api_key"]
+# Δημιουργία client OpenAI (σύμφωνα με νέο API)
+client = openai.OpenAI(api_key=st.secrets["openai_api_key"])
 
-# 🌟 Εμφάνιση τίτλου
+# Τίτλος εφαρμογής
 st.title("🎬 Video Analyzer AI")
-st.write("Δώσε link από YouTube, TikTok, Instagram και θα σου κάνουμε ανάλυση του περιεχομένου.")
+st.write("Επικόλλησε ένα URL από Instagram, TikTok ή YouTube για ανάλυση του περιεχομένου.")
 
-# 📥 URL input
-url = st.text_input("📎 Επικόλλησε το link του βίντεο:")
+# Εισαγωγή URL από χρήστη
+url = st.text_input("📎 Link του βίντεο:")
 
 if url:
     try:
-        with st.spinner("📥 Κατέβασμα βίντεο..."):
+        with st.spinner("📥 Κατεβάζουμε το βίντεο..."):
             video_filename = "video.mp4"
-
-            # Ρυθμίσεις yt-dlp
             ydl_opts = {
                 'format': 'mp4',
                 'outtmpl': video_filename,
                 'quiet': True,
             }
-
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
 
@@ -33,17 +30,19 @@ if url:
             audio = AudioSegment.from_file(video_filename)
             audio.export("audio.wav", format="wav")
 
-        with st.spinner("🧠 Ανάλυση περιεχομένου..."):
+        with st.spinner("🧠 Ανάλυση μέσω OpenAI Whisper..."):
             with open("audio.wav", "rb") as f:
-                transcript = openai.Audio.transcribe("whisper-1", f)
+                transcript = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=f
+                )
 
             st.subheader("📋 Κείμενο από το βίντεο:")
-            st.write(transcript["text"])
+            st.write(transcript.text)
 
-        # 🧹 Καθάρισμα προσωρινών αρχείων
+        # Καθάρισμα προσωρινών αρχείων
         os.remove("video.mp4")
         os.remove("audio.wav")
 
     except Exception as e:
-        st.error(f"⚠️ Κάτι πήγε στραβά: {e}")
-
+        st.error(f"⚠️ Κάτι πήγε στραβά:\n\n{e}")
