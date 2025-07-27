@@ -1,162 +1,147 @@
 import streamlit as st
-import requests
-import os
-import json
 from pytube import YouTube
+import os
+from pydub import AudioSegment
+import requests
+from fpdf import FPDF
 from googletrans import Translator
-from datetime import datetime
-import uuid
 from dotenv import load_dotenv
-import subprocess
 
 load_dotenv()
+
 ASSEMBLYAI_API_KEY = st.secrets["ASSEMBLYAI_API_KEY"]
 
-# 🧠 Αρχικοποίηση session state
-if "user" not in st.session_state:
-    st.session_state.user = None
+st.set_page_config(page_title="Video Insights App")
+st.title("🎥 Video Insights Analyzer")
+
+# Initialize favorites
 if "favorites" not in st.session_state:
     st.session_state.favorites = []
-if "visit_count" not in st.session_state:
-    st.session_state.visit_count = 0
 
-# 📥 Συνάρτηση λήψης video
+# Language selection
+lang_map = {
+    "Ελληνικά": "el",
+    "Αγγλικά": "en",
+    "Γαλλικά": "fr",
+    "Ισπανικά": "es",
+    "Γερμανικά": "de"
+}
+selected_language = st.selectbox("🌍 Γλώσσα Μετάφρασης", options=list(lang_map.keys()))
+target_lang = lang_map[selected_language]
+
 def download_video(url):
     yt = YouTube(url)
     stream = yt.streams.filter(file_extension='mp4').get_highest_resolution()
     stream.download(filename="video.mp4")
 
-# 🎵 Εξαγωγή ήχου με ffmpeg
 def extract_audio():
     try:
-        subprocess.run([
-            'ffmpeg', '-y', '-i', 'video.mp4',
-            '-vn', '-acodec', 'mp3', 'audio.mp3'
-        ], check=True)
-    except subprocess.CalledProcessError as e:
-        st.error("Σφάλμα εξαγωγής ήχου.")
-        raise e
+        audio = AudioSegment.from_file("video.mp4")
+        audio.export("audio.mp3", format="mp3")
+        return True
+    except Exception as e:
+        st.error(f"Σφάλμα εξαγωγής ήχου: {e}")
+        return False
 
-# 📝 Μετατροπή σε κείμενο με AssemblyAI
 def transcribe_audio():
     try:
-        headers = {'authorization': ASSEMBLYAI_API_KEY}
-        upload_response = requests.post(
-            'https://api.assemblyai.com/v2/upload',
+        headers = {
+            "authorization": ASSEMBLYAI_API_KEY
+        }
+        response = requests.post(
+            "https://api.assemblyai.com/v2/upload",
             headers=headers,
             files={'file': open("audio.mp3", 'rb')}
         )
-        upload_url = upload_response.json()['upload_url']
+        upload_url = response.json()['upload_url']
 
+        json = {"audio_url": upload_url}
         transcript_response = requests.post(
-            'https://api.assemblyai.com/v2/transcript',
-            headers=headers,
-            json={"audio_url": upload_url}
+            "https://api.assemblyai.com/v2/transcript",
+            json=json,
+            headers=headers
         )
         transcript_id = transcript_response.json()['id']
 
-        # Polling for status
         status = 'queued'
         while status not in ['completed', 'error']:
-            result = requests.get(
+            polling = requests.get(
                 f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
                 headers=headers
             ).json()
-            status = result['status']
-        
+            status = polling['status']
+
         if status == 'completed':
-            return result['text']
+            return polling['text']
         else:
-            st.error("Απέτυχε η μετατροπή ήχου σε κείμενο.")
             return ""
     except Exception as e:
-        st.error("Σφάλμα μετατροπής ήχου σε κείμενο.")
+        st.error(f"Σφάλμα μετατροπής ήχου σε κείμενο: {e}")
         return ""
 
-# 🌍 Μετάφραση & Περίληψη
-def translate_and_summarize(text):
+def summarize_text(text):
+    return text[:300] + "..." if len(text) > 300 else text
+
+def translate_text(text, dest_lang='el'):
     translator = Translator()
-    translated = translator.translate(text, dest='el').text
-    summary = text[:500] + "..." if len(text) > 500 else text
-    return translated, summary
+    return translator.translate(text, dest=dest_lang).text
 
-# 🖼️ UI
-st.title("📹 AI Ανάλυση Βίντεο")
+def create_pdf(transcript, summary, translation):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    pdf.multi_cell(0, 10, "📄 Αναφορά Βίντεο\n", align='L')
+    pdf.multi_cell(0, 10, f"🧾 Κείμενο:\n{transcript}\n", align='L')
+    pdf.multi_cell(0, 10, f"📌 Περίληψη:\n{summary}\n", align='L')
+    pdf.multi_cell(0, 10, f"🌐 Μετάφραση:\n{translation}\n", align='L')
+    pdf.output("analysis.pdf")
+    with open("analysis.pdf", "rb") as f:
+        st.download_button("⬇️ Κατέβασε ως PDF", f, file_name="analysis.pdf", mime="application/pdf")
 
-# 👤 Σύνδεση χρήστη
-st.sidebar.title("👤 Σύνδεση Χρήστη")
-username = st.sidebar.text_input("Όνομα ή Email")
-if st.sidebar.button("✅ Είσοδος"):
-    if username:
-        st.session_state.user = username
-        st.success(f"Καλώς ήρθες, {username}!")
-    else:
-        st.warning("Συμπλήρωσε όνομα.")
+url = st.text_input("📥 Επικόλλησε URL από YouTube")
+if st.button("Ανάλυση Βίντεο") and url:
+    try:
+        with st.spinner("📥 Κατεβάζω βίντεο..."):
+            download_video(url)
 
-# 📥 Ανάλυση βίντεο
-url = st.text_input("📎 Επικόλλησε URL από Instagram / YouTube / TikTok")
-if st.button("🔍 Ανάλυση"):
-    if url:
-        st.info("⏳ Γίνεται λήψη βίντεο...")
-        download_video(url)
+        with st.spinner("🎧 Εξάγω ήχο..."):
+            if not extract_audio():
+                st.stop()
 
-        st.info("🎵 Εξαγωγή ήχου...")
-        extract_audio()
+        with st.spinner("📝 Μετατροπή σε κείμενο..."):
+            transcript = transcribe_audio()
+            if not transcript:
+                st.warning("Δεν βρέθηκε κείμενο.")
+                st.stop()
 
-        st.info("📝 Μετατροπή ήχου σε κείμενο...")
-        full_text = transcribe_audio()
+        st.subheader("🧾 Κείμενο Βίντεο")
+        st.write(transcript)
 
-        if full_text:
-            st.success("✅ Ολοκληρώθηκε η μετατροπή σε κείμενο.")
-            st.subheader("📄 Αρχικό Κείμενο")
-            st.write(full_text)
+        summary = summarize_text(transcript)
+        st.subheader("📌 Περίληψη")
+        st.write(summary)
 
-            translated, summary = translate_and_summarize(full_text)
-            st.subheader("🌐 Μετάφραση")
-            st.write(translated)
-            st.subheader("🧠 Περίληψη")
-            st.write(summary)
+        translation = translate_text(transcript, dest_lang=target_lang)
+        st.subheader("🌐 Μετάφραση")
+        st.write(translation)
 
-            # ⭐ Αγαπημένα
-            if st.session_state.user:
-                if st.button("⭐ Αποθήκευση στα αγαπημένα"):
-                    fav = {
-                        "user": st.session_state.user,
-                        "url": url,
-                        "summary": summary,
-                        "date": datetime.now().isoformat()
-                    }
-                    st.session_state.favorites.append(fav)
-                    with open("favorites.json", "w") as f:
-                        json.dump(st.session_state.favorites, f)
-                    st.success("✅ Αποθηκεύτηκε στα αγαπημένα.")
+        create_pdf(transcript, summary, translation)
 
-# 📂 Φόρτωση αγαπημένων (αν υπάρχουν)
-try:
-    with open("favorites.json", "r") as f:
-        st.session_state.favorites = json.load(f)
-except:
-    pass
+        if st.button("⭐ Αποθήκευση στα Αγαπημένα"):
+            st.session_state.favorites.append({
+                "url": url,
+                "summary": summary,
+                "translation": translation
+            })
+            st.success("Αποθηκεύτηκε!")
 
-# 📌 Sidebar – Προβολή αγαπημένων
-if st.session_state.user:
-    st.sidebar.subheader("⭐ Τα Αγαπημένα σου")
-    user_favs = [f for f in st.session_state.favorites if f["user"] == st.session_state.user]
-    for fav in user_favs[-5:]:
-        st.sidebar.markdown(f"- {fav['summary'][:50]}...")
+    except Exception as e:
+        st.error(f"Σφάλμα: {e}")
 
-# 📊 Στατιστικά επισκεψιμότητας
-st.session_state.visit_count += 1
-st.sidebar.markdown(f"👁️ Επισκέψεις: {st.session_state.visit_count}")
-
-# 📁 Log επισκέψεων
-try:
-    log = {
-        "user": st.session_state.user or "anonymous",
-        "url": url,
-        "timestamp": datetime.now().isoformat()
-    }
-    with open("visits.json", "a") as f:
-        f.write(json.dumps(log) + "\n")
-except:
-    pass
+if st.session_state.favorites:
+    st.subheader("📌 Αγαπημένα")
+    for fav in st.session_state.favorites:
+        st.markdown(f"🔗 {fav['url']}")
+        st.markdown(f"📌 {fav['summary']}")
+        st.markdown(f"🌐 {fav['translation']}")
+        st.markdown("---")
