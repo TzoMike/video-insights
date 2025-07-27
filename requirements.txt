@@ -1,7 +1,7 @@
 streamlit
-requests
 pytube
-googletrans==4.0.0rc1
-python-dotenv
-yt-dlp
+pydub
 fpdf
+googletrans==4.0.0-rc1
+requests
+python-dotenv
