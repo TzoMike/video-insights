@@ -1,136 +1,87 @@
 import streamlit as st
 import subprocess
-from yt_dlp import YoutubeDL
-from pydub import AudioSegment
 import os
-from io import BytesIO
-import openai
-from googletrans import Translator
+import requests
+import time
+from fpdf import FPDF
 
-# Ορισμός API Key από Streamlit secrets
-openai.api_key = st.secrets["openai_api_key"]
+# === AssemblyAI API key ===
+ASSEMBLYAI_API_KEY = st.secrets["ASSEMBLYAI_API_KEY"]
 
-st.title("Video Insights - Ανάλυση και Μετάφραση Βίντεο")
+# === UI ===
+st.title("🎥 Video Analyzer")
+video_url = st.text_input("📎 Επικόλλησε το URL του βίντεο (YouTube, TikTok, Instagram):")
 
-def download_video(url, filename="video.mp4"):
-    ydl_opts = {
-        'format': 'best[ext=mp4]/best',
-        'outtmpl': filename,
-        'quiet': True,
-        'no_warnings': True,
-    }
-    with YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
-
-def extract_audio(video_path, audio_path):
-    try:
-        command = [
-            "ffmpeg", "-y",
-            "-i", video_path,
-            "-vn",
-            "-acodec", "pcm_s16le",
-            "-ar", "44100",
-            "-ac", "2",
-            audio_path
-        ]
-        result = subprocess.run(command, capture_output=True, text=True)
-        if result.returncode != 0:
-            st.error(f"Σφάλμα ffmpeg: {result.stderr}")
-            return False
-        return True
-    except Exception as e:
-        st.error(f"❌ Σφάλμα εξαγωγής ήχου: {e}")
-        return False
-
-def audio_to_text(audio_path):
-    try:
-        audio_file= open(audio_path, "rb")
-        transcript = openai.Audio.transcribe("whisper-1", audio_file)
-        return transcript['text']
-    except Exception as e:
-        st.error(f"❌ Σφάλμα μετατροπής ήχου σε κείμενο: {e}")
-        return None
-
-def translate_text(text, dest_lang="el"):
-    translator = Translator()
-    try:
-        translated = translator.translate(text, dest=dest_lang)
-        return translated.text
-    except Exception as e:
-        st.error(f"❌ Σφάλμα μετάφρασης: {e}")
-        return None
-
-def summarize_text(text):
-    try:
-        prompt = f"Παρακαλώ κάνε μια σύντομη περίληψη του παρακάτω κειμένου:\n\n{text}\n\nΠερίληψη:"
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=150,
-            temperature=0.5,
-        )
-        summary = response['choices'][0]['message']['content'].strip()
-        return summary
-    except Exception as e:
-        st.error(f"❌ Σφάλμα περίληψης: {e}")
-        return None
-
-# UI
-
-url = st.text_input("Επικόλλησε το URL του βίντεο (YouTube, TikTok, Instagram)")
-
-if st.button("Ανάλυση Βίντεο"):
-    if not url:
-        st.warning("Παρακαλώ εισάγετε URL βίντεο.")
+if st.button("Ανάλυση"):
+    if not video_url:
+        st.error("⚠️ Δώσε URL πρώτα.")
     else:
-        with st.spinner("Κατέβασμα βίντεο..."):
-            try:
-                download_video(url)
-                st.success("Το βίντεο κατέβηκε επιτυχώς.")
-            except Exception as e:
-                st.error(f"❌ Σφάλμα στο κατέβασμα βίντεο: {e}")
-                st.stop()
+        with st.spinner("📥 Κατέβασμα βίντεο..."):
+            subprocess.run(["yt-dlp", "-o", "video.mp4", video_url])
 
-        if not os.path.exists("video.mp4"):
-            st.error("Το αρχείο video.mp4 δεν βρέθηκε μετά το κατέβασμα.")
-            st.stop()
+        with st.spinner("🎧 Εξαγωγή ήχου..."):
+            subprocess.run(["ffmpeg", "-y", "-i", "video.mp4", "-vn", "-acodec", "mp3", "audio.mp3"])
 
-        with st.spinner("Εξαγωγή ήχου..."):
-            success = extract_audio("video.mp4", "audio.wav")
-            if not success:
-                st.stop()
+        with st.spinner("🧠 Μετατροπή σε κείμενο..."):
+
+            # 1. Upload audio
+            headers = {'authorization': ASSEMBLYAI_API_KEY}
+            upload_res = requests.post(
+                'https://api.assemblyai.com/v2/upload',
+                headers=headers,
+                files={'file': open("audio.mp3", 'rb')}
+            )
+            audio_url = upload_res.json()['upload_url']
+
+            # 2. Start transcription
+            json_data = {'audio_url': audio_url}
+            transcribe_res = requests.post(
+                'https://api.assemblyai.com/v2/transcript',
+                headers=headers,
+                json=json_data
+            )
+            transcript_id = transcribe_res.json()['id']
+
+            # 3. Poll for completion
+            status = 'queued'
+            while status not in ['completed', 'error']:
+                poll_res = requests.get(
+                    f'https://api.assemblyai.com/v2/transcript/{transcript_id}',
+                    headers=headers
+                )
+                status = poll_res.json()['status']
+                time.sleep(3)
+
+            if status == 'completed':
+                transcript_text = poll_res.json()['text']
+                st.success("📝 Κείμενο εξήχθη!")
+                st.text_area("🧾 Κείμενο", transcript_text, height=300)
+
+                # === Περίληψη ===
+                if st.button("🧠 Περίληψη"):
+                    summary = transcript_text[:400] + "..."  # Προσωρινή περίληψη
+                    st.write("✍️ **Περίληψη:**", summary)
+
+                # === Μετάφραση ===
+                if st.button("🌍 Μετάφραση στα Ελληνικά"):
+                    try:
+                        translate_url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=el&dt=t&q=" + transcript_text[:4000]
+                        result = requests.get(translate_url).json()
+                        translated = ''.join([part[0] for part in result[0]])
+                        st.write("🇬🇷 **Μετάφραση:**", translated)
+                    except:
+                        st.error("⚠️ Αποτυχία μετάφρασης.")
+
+                # === Λήψη PDF ===
+                if st.button("📄 Λήψη PDF"):
+                    pdf = FPDF()
+                    pdf.add_page()
+                    pdf.set_font("Arial", size=12)
+                    pdf.multi_cell(0, 10, transcript_text)
+                    pdf.output("analysis.pdf")
+                    with open("analysis.pdf", "rb") as file:
+                        st.download_button("📥 Κατέβασε το PDF", file, "analysis.pdf")
+
             else:
-                st.success("Εξαγωγή ήχου ολοκληρώθηκε.")
-
-        with st.spinner("Μετατροπή ήχου σε κείμενο..."):
-            transcript = audio_to_text("audio.wav")
-            if not transcript:
-                st.stop()
-            st.success("Μετατροπή σε κείμενο ολοκληρώθηκε.")
-
-        st.subheader("Κείμενο από το βίντεο:")
-        st.write(transcript)
-
-        # Επιλογή μετάφρασης
-        lang = st.selectbox("Επέλεξε γλώσσα μετάφρασης:", ["el", "en", "fr", "de", "es", "it", "ru", "zh-cn"])
-        if st.button("Μετάφραση Κειμένου"):
-            with st.spinner("Μετάφραση..."):
-                translated_text = translate_text(transcript, dest_lang=lang)
-                if translated_text:
-                    st.subheader(f"Μετάφραση σε {lang}:")
-                    st.write(translated_text)
-
-        # Περίληψη
-        if st.button("Περίληψη Κειμένου"):
-            with st.spinner("Δημιουργία περίληψης..."):
-                summary = summarize_text(transcript)
-                if summary:
-                    st.subheader("Περίληψη:")
-                    st.write(summary)
-
-# Καθαρισμός αρχείων (προαιρετικό)
-if os.path.exists("video.mp4"):
-    os.remove("video.mp4")
-if os.path.exists("audio.wav"):
-    os.remove("audio.wav")
+                st.error("❌ Απέτυχε η μεταγραφή.")
 
