@@ -6,6 +6,7 @@ import requests
 from fpdf import FPDF
 from googletrans import Translator
 from dotenv import load_dotenv
+import time
 
 load_dotenv()
 
@@ -24,7 +25,12 @@ lang_map = {
     "Αγγλικά": "en",
     "Γαλλικά": "fr",
     "Ισπανικά": "es",
-    "Γερμανικά": "de"
+    "Γερμανικά": "de",
+    "Ινδικά": "hi",
+    "Κινέζικα": "zh-cn",
+    "Ρωσικά": "ru",
+    "Ολλανδικά": "nl",
+    "Αραβικά": "ar"
 }
 selected_language = st.selectbox("🌍 Γλώσσα Μετάφρασης", options=list(lang_map.keys()))
 target_lang = lang_map[selected_language]
@@ -45,35 +51,43 @@ def extract_audio():
 
 def transcribe_audio():
     try:
-        headers = {
-            "authorization": ASSEMBLYAI_API_KEY
+        upload_headers = {
+            "authorization": ASSEMBLYAI_API_KEY,
+            "transfer-encoding": "chunked"
         }
-        response = requests.post(
-            "https://api.assemblyai.com/v2/upload",
-            headers=headers,
-            files={'file': open("audio.mp3", 'rb')}
-        )
-        upload_url = response.json()['upload_url']
 
-        json = {"audio_url": upload_url}
+        with open("audio.mp3", 'rb') as f:
+            upload_response = requests.post(
+                "https://api.assemblyai.com/v2/upload",
+                headers=upload_headers,
+                data=f
+            )
+        upload_response.raise_for_status()
+        upload_url = upload_response.json()['upload_url']
+
         transcript_response = requests.post(
             "https://api.assemblyai.com/v2/transcript",
-            json=json,
-            headers=headers
+            json={"audio_url": upload_url},
+            headers={"authorization": ASSEMBLYAI_API_KEY}
         )
+        transcript_response.raise_for_status()
         transcript_id = transcript_response.json()['id']
 
+        # Wait for transcription to complete
         status = 'queued'
+        polling_url = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
         while status not in ['completed', 'error']:
-            polling = requests.get(
-                f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
-                headers=headers
-            ).json()
-            status = polling['status']
+            polling = requests.get(polling_url, headers={"authorization": ASSEMBLYAI_API_KEY})
+            polling.raise_for_status()
+            polling_data = polling.json()
+            status = polling_data['status']
+            if status == 'processing':
+                time.sleep(3)
 
         if status == 'completed':
-            return polling['text']
+            return polling_data['text']
         else:
+            st.error("Η μεταγραφή απέτυχε.")
             return ""
     except Exception as e:
         st.error(f"Σφάλμα μετατροπής ήχου σε κείμενο: {e}")
@@ -83,8 +97,12 @@ def summarize_text(text):
     return text[:300] + "..." if len(text) > 300 else text
 
 def translate_text(text, dest_lang='el'):
-    translator = Translator()
-    return translator.translate(text, dest=dest_lang).text
+    try:
+        translator = Translator()
+        return translator.translate(text, dest=dest_lang).text
+    except Exception as e:
+        st.warning(f"Αποτυχία μετάφρασης: {e}")
+        return text
 
 def create_pdf(transcript, summary, translation):
     pdf = FPDF()
