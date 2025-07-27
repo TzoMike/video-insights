@@ -1,70 +1,104 @@
 import streamlit as st
 import openai
-import yt_dlp
 import os
-from pathlib import Path
+import subprocess
+from yt_dlp import YoutubeDL
+from dotenv import load_dotenv
+from googletrans import Translator
 
-st.set_page_config(page_title="Video Analyzer", layout="centered")
-
-# === OpenAI API key ===
+load_dotenv()
 openai.api_key = st.secrets["openai_api_key"]
 
-# === UI ===
-st.title("📥 Ανάλυση Βίντεο από URL")
-url = st.text_input("🔗 Επικόλλησε το URL από Instagram, TikTok ή YouTube")
+st.set_page_config(page_title="Video Insight AI", layout="wide")
+st.title("🎬 Video Insight AI")
+st.markdown("Ανάλυσε και κατάλαβε βίντεο από YouTube, Instagram, TikTok, κ.ά.")
 
-if url:
-    if st.button("📥 Λήψη Βίντεο"):
-        with st.spinner("Κατεβάζω το βίντεο..."):
-            try:
-                output_dir = "downloads"
-                os.makedirs(output_dir, exist_ok=True)
+# === 1. Εισαγωγή URL ===
+video_url = st.text_input("📎 Επικόλλησε το URL του βίντεο")
 
-                ydl_opts = {
-                    'outtmpl': os.path.join(output_dir, 'video.%(ext)s'),
-                    'format': 'best[ext=mp4]/best',
-                    'quiet': True,
-                }
+# === 2. Κατέβασμα βίντεο ===
+def download_video(url, output_path="video.mp4"):
+    ydl_opts = {
+        'outtmpl': output_path,
+        'format': 'bestvideo+bestaudio/best',
+        'quiet': True,
+    }
+    with YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
 
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.download([url])
+# === 3. Εξαγωγή ήχου με ffmpeg ===
+def extract_audio(video_path, audio_path):
+    try:
+        command = [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-vn",
+            "-acodec", "pcm_s16le",
+            "-ar", "44100",
+            "-ac", "2",
+            audio_path
+        ]
+        subprocess.run(command, check=True)
+        return True
+    except Exception as e:
+        st.error(f"❌ Σφάλμα εξαγωγής ήχου: {e}")
+        return False
 
-                # Εμφάνιση αποτελέσματος
-                st.success("✅ Το βίντεο κατέβηκε με επιτυχία.")
-                video_path = os.path.join(output_dir, 'video.mp4')
-                if os.path.exists(video_path):
-                    st.video(video_path)
-                    st.info("⚙️ Η μετατροπή σε κείμενο θα ενεργοποιηθεί σύντομα.")
-                else:
-                    st.warning("Το βίντεο κατέβηκε με άλλο format.")
+# === 4. Μετατροπή ήχου σε κείμενο ===
+def transcribe_audio(audio_path):
+    with open(audio_path, "rb") as audio_file:
+        transcript = openai.Audio.transcribe("whisper-1", audio_file)
+        return transcript["text"]
 
-            except Exception as e:
-                st.error(f"❌ Σφάλμα κατά το κατέβασμα: {str(e)}")
+# === 5. Περίληψη ===
+def summarize_text(text):
+    prompt = f"Σύνοψισε το παρακάτω κείμενο στα ελληνικά:\n\n{text}"
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.choices[0].message.content.strip()
 
-st.divider()
-st.subheader("📝 Εναλλακτικά: Αν έχεις ήδη το κείμενο")
+# === 6. Μετάφραση ===
+def translate_text(text, dest_lang="el"):
+    translator = Translator()
+    translated = translator.translate(text, dest=dest_lang)
+    return translated.text
 
-transcript = st.text_area("📋 Επικόλλησε εδώ το κείμενο από το βίντεο", height=300)
+# === Λογική Εκτέλεσης ===
+if video_url:
+    with st.spinner("⬇️ Κατέβασμα βίντεο..."):
+        try:
+            download_video(video_url)
+            st.success("✅ Το βίντεο κατέβηκε με επιτυχία.")
+        except Exception as e:
+            st.error(f"❌ Σφάλμα στο κατέβασμα: {e}")
+            st.stop()
 
-if transcript:
-    lang = st.selectbox("🌍 Επίλεξε γλώσσα μετάφρασης", ["Ελληνικά", "Αγγλικά", "Ισπανικά", "Γαλλικά"])
+    with st.spinner("🔊 Εξαγωγή ήχου..."):
+        if not extract_audio("video.mp4", "audio.wav"):
+            st.stop()
+        else:
+            st.success("✅ Ο ήχος εξήχθη με επιτυχία.")
 
-    if st.button("🔄 Μετάφραση"):
-        with st.spinner("Μετάφραση..."):
-            prompt = f"Μετάφρασε το παρακάτω κείμενο στα {lang}:\n\n{transcript}"
-            response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": prompt}]
-            )
-            st.subheader("🌐 Μετάφραση:")
-            st.write(response.choices[0].message.content)
+    with st.spinner("🧠 Μετατροπή ήχου σε κείμενο..."):
+        try:
+            transcript_text = transcribe_audio("audio.wav")
+            st.text_area("📜 Κείμενο από το βίντεο:", transcript_text, height=300)
+        except Exception as e:
+            st.error(f"❌ Σφάλμα μετατροπής σε κείμενο: {e}")
+            st.stop()
 
-    if st.button("📝 Περίληψη"):
-        with st.spinner("Δημιουργία περίληψης..."):
-            prompt = f"Δώσε σύντομη περίληψη για το παρακάτω κείμενο:\n\n{transcript}"
-            response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": prompt}]
-            )
-            st.subheader("📄 Περίληψη:")
-            st.write(response.choices[0].message.content)
+    # === Περίληψη ===
+    if st.button("📚 Δημιούργησε Περίληψη"):
+        with st.spinner("✍️ Δημιουργία περίληψης..."):
+            summary = summarize_text(transcript_text)
+            st.success("Περίληψη:")
+            st.write(summary)
+
+    # === Μετάφραση ===
+    if st.button("🌍 Μετάφρασε στα Ελληνικά"):
+        with st.spinner("🔁 Μετάφραση..."):
+            translation = translate_text(transcript_text, dest_lang="el")
+            st.success("Μετάφραση:")
+            st.write(translation)
