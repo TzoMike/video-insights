@@ -5,3 +5,4 @@ requests
 fpdf
 googletrans==4.0.0rc1
 python-dotenv
+openai
