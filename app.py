@@ -7,6 +7,7 @@ import time
 from fpdf import FPDF
 from googletrans import Translator
 from dotenv import load_dotenv
+from mimetypes import guess_type
 
 load_dotenv()
 
@@ -65,6 +66,10 @@ def extract_audio():
         if os.path.getsize("audio.mp3") == 0:
             st.error("Audio file is empty after extraction.")
             return False
+        mime_type, _ = guess_type("audio.mp3")
+        if not mime_type or not mime_type.startswith("audio"):
+            st.error("Extracted file is not recognized as audio.")
+            return False
         return True
     except Exception as e:
         st.error(f"Audio extraction error: {e}")
@@ -75,10 +80,11 @@ def transcribe_audio(language_code="en"):
         headers = {"authorization": ASSEMBLYAI_API_KEY}
 
         with open("audio.mp3", "rb") as f:
+            data = f.read()
             upload_response = requests.post(
                 "https://api.assemblyai.com/v2/upload",
                 headers=headers,
-                files={"file": f}
+                data=data
             )
 
         st.write("Upload status:", upload_response.status_code)
