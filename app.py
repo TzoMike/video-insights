@@ -18,7 +18,6 @@ st.title("🎥 Video Insights Analyzer")
 if "favorites" not in st.session_state:
     st.session_state.favorites = []
 
-# Supported transcription languages by AssemblyAI
 SUPPORTED_ASSEMBLYAI_LANGUAGES = {
     "English": "en",
     "Spanish": "es",
@@ -35,7 +34,6 @@ SUPPORTED_ASSEMBLYAI_LANGUAGES = {
     "Arabic": "ar"
 }
 
-# All translation languages supported by Google Translate
 TRANSLATION_LANGUAGES = {
     "Greek": "el",
     "English": "en",
@@ -49,7 +47,6 @@ TRANSLATION_LANGUAGES = {
     "Arabic": "ar"
 }
 
-# User selects transcription and translation languages
 transcribe_lang = st.selectbox("🗣️ Audio language for transcription", list(SUPPORTED_ASSEMBLYAI_LANGUAGES.keys()))
 transcribe_lang_code = SUPPORTED_ASSEMBLYAI_LANGUAGES[transcribe_lang]
 
@@ -65,6 +62,9 @@ def extract_audio():
     try:
         audio = AudioSegment.from_file("video.mp4")
         audio.export("audio.mp3", format="mp3")
+        if os.path.getsize("audio.mp3") == 0:
+            st.error("Audio file is empty after extraction.")
+            return False
         return True
     except Exception as e:
         st.error(f"Audio extraction error: {e}")
@@ -73,6 +73,7 @@ def extract_audio():
 def transcribe_audio(language_code="en"):
     try:
         headers = {"authorization": ASSEMBLYAI_API_KEY}
+
         with open("audio.mp3", "rb") as f:
             upload_response = requests.post(
                 "https://api.assemblyai.com/v2/upload",
@@ -80,11 +81,17 @@ def transcribe_audio(language_code="en"):
                 files={"file": f}
             )
 
+        st.write("Upload status:", upload_response.status_code)
+        st.json(upload_response.json())
+
         if upload_response.status_code != 200:
             st.error(f"Upload failed: {upload_response.text}")
             return ""
 
-        upload_url = upload_response.json()["upload_url"]
+        upload_url = upload_response.json().get("upload_url")
+        if not upload_url:
+            st.error("Upload URL not found in response.")
+            return ""
 
         json_payload = {"audio_url": upload_url, "language_code": language_code}
         transcript_response = requests.post(
@@ -93,6 +100,9 @@ def transcribe_audio(language_code="en"):
             json=json_payload
         )
 
+        st.write("Transcription request status:", transcript_response.status_code)
+        st.json(transcript_response.json())
+
         if transcript_response.status_code != 200:
             st.error(f"Transcription request failed: {transcript_response.text}")
             return ""
@@ -100,17 +110,20 @@ def transcribe_audio(language_code="en"):
         transcript_id = transcript_response.json()["id"]
         status = "queued"
         while status not in ["completed", "error"]:
-            result = requests.get(
+            poll_response = requests.get(
                 f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
                 headers=headers
-            ).json()
+            )
+            result = poll_response.json()
+            st.write("Polling status:", result.get("status"))
             status = result["status"]
             time.sleep(3)
 
         if status == "completed":
             return result["text"]
         else:
-            st.error("Transcription failed.")
+            st.error("Transcription failed:")
+            st.json(result)
             return ""
     except Exception as e:
         st.error(f"Transcription error: {e}")
