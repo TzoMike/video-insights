@@ -85,60 +85,121 @@ class VideoProcessor:
         try:
             logger.info(f"Downloading YouTube video: {url}")
             
-            # Method 1: Try with pytubefix (more stable than pytube)
-            try:
-                yt = YouTube(url)
-                
-                # Get video info safely
-                video_info = {
-                    'title': getattr(yt, 'title', 'Unknown Title'),
-                    'length': getattr(yt, 'length', 0),
-                    'views': getattr(yt, 'views', 0),
-                    'author': getattr(yt, 'author', 'Unknown Author')
-                }
-                
-                # Try different stream selection strategies
-                audio_stream = None
-                
-                # Strategy 1: Audio-only streams
+            # Clean the URL to ensure it's properly formatted
+            if "youtu.be/" in url:
+                video_id = url.split("youtu.be/")[-1].split("?")[0]
+                url = f"https://www.youtube.com/watch?v={video_id}"
+            elif "youtube.com" in url and "v=" not in url:
+                # Handle other YouTube URL formats
+                return False, "Invalid YouTube URL format. Please use: https://www.youtube.com/watch?v=VIDEO_ID", {}
+            
+            # Try multiple approaches with different configurations
+            for attempt in range(3):
                 try:
-                    audio_streams = yt.streams.filter(only_audio=True)
-                    if audio_streams:
-                        audio_stream = audio_streams.first()
-                except:
-                    pass
-                
-                # Strategy 2: Progressive streams (contain both audio and video)
-                if not audio_stream:
+                    logger.info(f"Download attempt {attempt + 1}")
+                    
+                    # Different configurations for each attempt
+                    if attempt == 0:
+                        # Standard approach
+                        yt = YouTube(url)
+                    elif attempt == 1:
+                        # Try with different user agent
+                        yt = YouTube(url)
+                    else:
+                        # Last attempt with minimal config
+                        yt = YouTube(url, use_oauth=False, allow_oauth_cache=False)
+                    
+                    # Get video info safely
                     try:
-                        progressive_streams = yt.streams.filter(progressive=True, file_extension='mp4')
-                        if progressive_streams:
-                            audio_stream = progressive_streams.order_by('resolution').asc().first()
+                        video_info = {
+                            'title': yt.title or 'Unknown Title',
+                            'length': yt.length or 0,
+                            'views': yt.views or 0,
+                            'author': yt.author or 'Unknown Author'
+                        }
                     except:
-                        pass
-                
-                # Strategy 3: Any available stream
-                if not audio_stream:
+                        video_info = {
+                            'title': 'Unknown Title',
+                            'length': 0,
+                            'views': 0,
+                            'author': 'Unknown Author'
+                        }
+                    
+                    # Try different stream selection strategies
+                    audio_stream = None
+                    
+                    # Get available streams
                     try:
-                        all_streams = yt.streams.filter(file_extension='mp4')
-                        if all_streams:
-                            audio_stream = all_streams.first()
-                    except:
-                        pass
-                
-                if not audio_stream:
-                    return False, "No compatible streams found. This video may be restricted or unavailable.", {}
-                
-                # Download the stream
-                logger.info(f"Downloading stream: {audio_stream}")
-                temp_file = audio_stream.download(
-                    output_path=output_path, 
-                    filename="temp_video.mp4"
-                )
-                
-            except Exception as e1:
-                logger.error(f"pytubefix download failed: {str(e1)}")
-                return False, f"Download failed: {str(e1)}. This video may be age-restricted, private, or region-blocked.", {}
+                        streams = yt.streams
+                        logger.info(f"Found {len(streams)} total streams")
+                        
+                        # Strategy 1: Audio-only streams (best quality)
+                        audio_only = streams.filter(only_audio=True)
+                        if audio_only:
+                            audio_stream = audio_only.order_by('abr').desc().first()
+                            logger.info("Using audio-only stream")
+                        
+                        # Strategy 2: Progressive streams (audio+video, but reliable)
+                        if not audio_stream:
+                            progressive = streams.filter(progressive=True, file_extension='mp4')
+                            if progressive:
+                                audio_stream = progressive.order_by('resolution').asc().first()
+                                logger.info("Using progressive stream")
+                        
+                        # Strategy 3: Any MP4 stream
+                        if not audio_stream:
+                            mp4_streams = streams.filter(file_extension='mp4')
+                            if mp4_streams:
+                                audio_stream = mp4_streams.first()
+                                logger.info("Using any MP4 stream")
+                        
+                        # Strategy 4: Any stream at all
+                        if not audio_stream and streams:
+                            audio_stream = streams.first()
+                            logger.info("Using first available stream")
+                        
+                    except Exception as stream_error:
+                        logger.error(f"Error getting streams: {stream_error}")
+                        continue
+                    
+                    if not audio_stream:
+                        logger.warning(f"No streams found on attempt {attempt + 1}")
+                        continue
+                    
+                    # Download the stream
+                    logger.info(f"Downloading: {audio_stream.mime_type} - {getattr(audio_stream, 'resolution', 'audio only')}")
+                    
+                    try:
+                        temp_filename = f"temp_video_attempt_{attempt}.{audio_stream.subtype}"
+                        temp_file = audio_stream.download(
+                            output_path=output_path, 
+                            filename=temp_filename
+                        )
+                        
+                        # If we got here, download succeeded
+                        logger.info(f"Download successful: {temp_file}")
+                        break
+                        
+                    except Exception as download_error:
+                        logger.error(f"Download attempt {attempt + 1} failed: {download_error}")
+                        if attempt == 2:  # Last attempt
+                            raise download_error
+                        continue
+                        
+                except Exception as e:
+                    logger.error(f"Attempt {attempt + 1} failed: {str(e)}")
+                    if attempt == 2:  # Last attempt failed
+                        # Provide specific error messages based on the error
+                        error_msg = str(e).lower()
+                        if "403" in error_msg or "forbidden" in error_msg:
+                            return False, "❌ Access forbidden. This video may be:\n• Age-restricted\n• Private or unlisted\n• Region-blocked\n• Protected by YouTube\n\n💡 Try a different public video", {}
+                        elif "404" in error_msg or "not found" in error_msg:
+                            return False, "❌ Video not found. Please check the URL and make sure the video exists.", {}
+                        elif "unavailable" in error_msg:
+                            return False, "❌ Video unavailable. It may have been deleted or made private.", {}
+                        else:
+                            return False, f"❌ Download failed: {str(e)}\n\n💡 Try a different video or check if the URL is correct.", {}
+                    continue
             
             # Convert to MP3 using pydub
             try:
@@ -150,35 +211,35 @@ class VideoProcessor:
                 # Create MP3 file path
                 mp3_file = os.path.join(output_path, "audio.mp3")
                 
-                # Export with optimized settings for transcription
+                # Export with settings optimized for Whisper
                 audio.export(
                     mp3_file, 
                     format="mp3", 
                     bitrate="128k",
-                    parameters=["-ac", "1", "-ar", "16000"]  # Mono, 16kHz (optimal for Whisper)
+                    parameters=["-ac", "1", "-ar", "16000"]  # Mono, 16kHz
                 )
                 
                 # Clean up original file
-                if os.path.exists(temp_file) and temp_file != mp3_file:
-                    try:
+                try:
+                    if os.path.exists(temp_file) and temp_file != mp3_file:
                         os.remove(temp_file)
-                    except:
-                        pass  # Don't fail if cleanup fails
+                except:
+                    pass  # Don't fail if cleanup fails
                 
-                # Verify the MP3 file was created successfully
-                if os.path.exists(mp3_file) and os.path.getsize(mp3_file) > 1000:  # At least 1KB
-                    logger.info(f"Audio successfully extracted to: {mp3_file}")
+                # Verify the MP3 file
+                if os.path.exists(mp3_file) and os.path.getsize(mp3_file) > 1000:
+                    logger.info(f"✅ Audio successfully extracted: {os.path.getsize(mp3_file)} bytes")
                     return True, mp3_file, video_info
                 else:
-                    return False, "Generated audio file is empty or corrupted", {}
+                    return False, "❌ Generated audio file is empty or too small", {}
                     
             except Exception as conv_error:
                 logger.error(f"Audio conversion failed: {str(conv_error)}")
-                return False, f"Audio conversion failed: {str(conv_error)}. The downloaded file may be corrupted.", {}
+                return False, f"❌ Audio conversion failed: {str(conv_error)}", {}
             
         except Exception as e:
-            logger.error(f"Unexpected error in download_youtube_audio: {str(e)}")
-            return False, f"Unexpected error: {str(e)}", {}
+            logger.error(f"Unexpected error: {str(e)}")
+            return False, f"❌ Unexpected error: {str(e)}", {}
     
     def transcribe_audio(self, audio_path: str, openai_api_key: str) -> Tuple[bool, str]:
         """Transcribe audio using OpenAI Whisper"""
@@ -367,9 +428,23 @@ def main():
         st.markdown("---")
         st.markdown("### 📚 Supported Platforms")
         st.markdown("- ✅ YouTube")
+        st.markdown("- ✅ Direct file upload")
         st.markdown("- ❌ Instagram (API required)")
         st.markdown("- ❌ Facebook (API required)")
         st.markdown("- ❌ TikTok (API required)")
+        
+        st.markdown("---")
+        st.markdown("### 🧪 Test Videos")
+        st.markdown("If you're having issues, try these:")
+        test_urls = [
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+            "https://www.youtube.com/watch?v=9bZkp7q19f0"
+        ]
+        for i, url in enumerate(test_urls, 1):
+            if st.button(f"Test Video {i}", key=f"test_{i}"):
+                st.code(url)
+                st.info("Copy this URL to the input field above")
     
     # Main content area
     col1, col2 = st.columns([2, 1])
@@ -383,42 +458,99 @@ def main():
             placeholder="https://www.youtube.com/watch?v=..."
         )
         
-        # Process button
-        process_button = st.button("🚀 Process Video", type="primary")
+        st.markdown("**OR**")
         
-        if process_button and video_url:
-            
-            # Validate URL
-            is_valid, platform_or_error = processor.validate_url(video_url)
-            
-            if not is_valid:
-                st.error(f"❌ {platform_or_error}")
+        # File upload option
+        st.subheader("📁 Upload Audio/Video File")
+        uploaded_file = st.file_uploader(
+            "Upload an audio or video file directly:",
+            type=['mp3', 'wav', 'mp4', 'avi', 'mov', 'mkv', 'm4a', 'flac'],
+            help="Supported formats: MP3, WAV, MP4, AVI, MOV, MKV, M4A, FLAC"
+        )
+        
+        # Process button
+        process_button = st.button("🚀 Process", type="primary")
+        
+        if process_button and (video_url or uploaded_file):
+            if not video_url and not uploaded_file:
+                st.error("Please provide either a video URL or upload a file")
                 return
             
             # Processing steps
-            with st.spinner("Processing video..."):
+            with st.spinner("Processing..."):
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 
-                # Step 1: Download and extract audio
-                status_text.text("⏬ Downloading video and extracting audio...")
-                progress_bar.progress(20)
-                
                 with tempfile.TemporaryDirectory() as temp_dir:
-                    success, audio_path_or_error, video_info = processor.download_youtube_audio(
-                        video_url, temp_dir
-                    )
+                    audio_path = None
+                    video_info = {}
                     
-                    if not success:
-                        st.error(f"❌ {audio_path_or_error}")
-                        return
+                    # Step 1: Get audio file (either download or from upload)
+                    if uploaded_file:
+                        status_text.text("📁 Processing uploaded file...")
+                        progress_bar.progress(20)
+                        
+                        # Save uploaded file
+                        temp_input_path = os.path.join(temp_dir, f"uploaded_file.{uploaded_file.name.split('.')[-1]}")
+                        with open(temp_input_path, "wb") as f:
+                            f.write(uploaded_file.getbuffer())
+                        
+                        # Convert to MP3 if needed
+                        try:
+                            audio = AudioSegment.from_file(temp_input_path)
+                            mp3_file = os.path.join(temp_dir, "audio.mp3")
+                            audio.export(
+                                mp3_file, 
+                                format="mp3", 
+                                bitrate="128k",
+                                parameters=["-ac", "1", "-ar", "16000"]
+                            )
+                            audio_path = mp3_file
+                            video_info = {
+                                'title': uploaded_file.name,
+                                'length': len(audio) // 1000,  # Convert to seconds
+                                'views': 'N/A',
+                                'author': 'Uploaded File'
+                            }
+                            st.success("✅ File processed successfully!")
+                            
+                        except Exception as e:
+                            st.error(f"❌ Error processing uploaded file: {str(e)}")
+                            return
+                    
+                    elif video_url:
+                        status_text.text("⏬ Downloading video and extracting audio...")
+                        progress_bar.progress(20)
+                        
+                        # Validate URL
+                        is_valid, platform_or_error = processor.validate_url(video_url)
+                        
+                        if not is_valid:
+                            st.error(f"❌ {platform_or_error}")
+                            return
+                        
+                        success, audio_path_or_error, video_info = processor.download_youtube_audio(
+                            video_url, temp_dir
+                        )
+                        
+                        if not success:
+                            st.error(audio_path_or_error)
+                            st.info("💡 **Alternative solutions:**\n"
+                                   "1. Try a different YouTube video (public, not age-restricted)\n"
+                                   "2. Use the file upload option above\n"
+                                   "3. Try these test videos:\n"
+                                   "   • https://www.youtube.com/watch?v=dQw4w9WgXcQ\n"
+                                   "   • https://www.youtube.com/watch?v=jNQXAC9IVRw")
+                            return
+                        
+                        audio_path = audio_path_or_error
                     
                     # Step 2: Transcribe audio
                     status_text.text("🎤 Transcribing audio...")
                     progress_bar.progress(40)
                     
                     success, transcript_or_error = processor.transcribe_audio(
-                        audio_path_or_error, openai_api_key
+                        audio_path, openai_api_key
                     )
                     
                     if not success:
@@ -505,7 +637,7 @@ def main():
                     # Save to favorites
                     if st.button("⭐ Save to Favorites"):
                         favorite_item = {
-                            'url': video_url,
+                            'url': video_url or f"Uploaded: {uploaded_file.name}",
                             'title': video_info.get('title', 'Untitled'),
                             'summary': summary,
                             'translation': translation_or_error if success else None,
