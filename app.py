@@ -283,16 +283,20 @@ def main():
     # Initialize processor
     processor = VideoProcessor()
     
+    # Get OpenAI API key from Streamlit secrets
+    try:
+        openai_api_key = st.secrets["OPENAI_API_KEY"]
+    except KeyError:
+        st.error("🔑 OpenAI API key not found in secrets. Please add OPENAI_API_KEY to your Streamlit secrets.")
+        st.info("Go to your Streamlit Cloud app settings → Secrets and add: OPENAI_API_KEY = \"your-api-key-here\"")
+        st.stop()
+    
     # Sidebar for settings
     with st.sidebar:
         st.header("⚙️ Settings")
         
-        # OpenAI API Key
-        openai_api_key = st.text_input(
-            "OpenAI API Key",
-            type="password",
-            help="Required for audio transcription using Whisper"
-        )
+        # Show API key status
+        st.success("🔑 OpenAI API Key: Loaded from secrets")
         
         # Language selection
         target_language = st.selectbox(
@@ -324,9 +328,6 @@ def main():
         process_button = st.button("🚀 Process Video", type="primary")
         
         if process_button and video_url:
-            if not openai_api_key:
-                st.error("Please provide your OpenAI API key in the sidebar")
-                return
             
             # Validate URL
             is_valid, platform_or_error = processor.validate_url(video_url)
