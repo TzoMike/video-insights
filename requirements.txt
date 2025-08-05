@@ -1,7 +1,7 @@
-streamlit
-pytube
-pydub
-openai
-fpdf
+streamlit>=1.28.0
+pytube>=15.0.0
+yt-dlp>=2023.7.6
+pydub>=0.25.1
+openai>=1.0.0
 googletrans==4.0.0rc1
-python-dotenv
+fpdf2>=2.7.4
