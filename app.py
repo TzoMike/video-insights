@@ -1,23 +1,25 @@
 import streamlit as st
 from pytube import YouTube
+import os
 from pydub import AudioSegment
+import openai
 from fpdf import FPDF
 from googletrans import Translator
 from dotenv import load_dotenv
-import openai
-import os
-import logging
 from mimetypes import guess_type
+import logging
 
-# Setup
+# Setup logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
 load_dotenv()
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 st.set_page_config(page_title="Video Insights App")
 st.title("🎥 Video Insights Analyzer")
 
+# Session state
 if "favorites" not in st.session_state:
     st.session_state.favorites = []
 
@@ -34,39 +36,54 @@ TRANSLATION_LANGUAGES = {
     "Arabic": "ar"
 }
 
-translate_lang = st.selectbox("🌍 Target language for translation", list(TRANSLATION_LANGUAGES.keys()))
+translate_lang = st.selectbox("🌍 Target translation language", list(TRANSLATION_LANGUAGES.keys()))
 translate_lang_code = TRANSLATION_LANGUAGES[translate_lang]
+
+# File paths for temp usage
+VIDEO_PATH = "/tmp/video.mp4"
+AUDIO_PATH = "/tmp/audio.mp3"
 
 def download_video(url):
     yt = YouTube(url)
     stream = yt.streams.filter(file_extension='mp4').get_highest_resolution()
-    stream.download(filename="video.mp4")
+    stream.download(filename=VIDEO_PATH)
 
 def extract_audio():
     try:
-        audio = AudioSegment.from_file("video.mp4")
-        audio.export("audio.mp3", format="mp3")
-        if os.path.getsize("audio.mp3") == 0:
-            st.error("Audio file is empty after extraction.")
+        audio = AudioSegment.from_file(VIDEO_PATH)
+        audio.export(AUDIO_PATH, format="mp3", codec="libmp3lame")
+
+        if os.path.getsize(AUDIO_PATH) == 0:
+            st.error("Extracted audio file is empty.")
             return False
-        mime_type, _ = guess_type("audio.mp3")
+
+        mime_type, _ = guess_type(AUDIO_PATH)
         if not mime_type or not mime_type.startswith("audio"):
-            st.error("Extracted file is not valid audio.")
+            st.error("File is not recognized as audio.")
             return False
+
+        if os.path.getsize(AUDIO_PATH) > 25 * 1024 * 1024:
+            st.error("Audio file exceeds OpenAI size limit (25MB).")
+            return False
+
         return True
     except Exception as e:
         logger.exception("Audio extraction failed")
         st.error(f"Audio extraction error: {e}")
         return False
 
-def transcribe_audio_whisper():
+def transcribe_audio_openai():
     try:
-        with open("audio.mp3", "rb") as f:
-            transcript = openai.Audio.transcribe("whisper-1", f)
-        return transcript["text"]
+        with open(AUDIO_PATH, "rb") as audio_file:
+            transcript = openai.Audio.transcribe("whisper-1", audio_file)
+            return transcript["text"]
+    except openai.error.OpenAIError as e:
+        logger.exception("OpenAI API error")
+        st.error(f"OpenAI error: {e}")
+        return ""
     except Exception as e:
-        logger.exception("Transcription failed")
-        st.error(f"Transcription error: {e}")
+        logger.exception("Unexpected transcription error")
+        st.error(f"Unexpected transcription error: {e}")
         return ""
 
 def summarize_text(text):
@@ -74,7 +91,12 @@ def summarize_text(text):
 
 def translate_text(text, dest_lang='el'):
     translator = Translator()
-    return translator.translate(text, dest=dest_lang).text
+    try:
+        return translator.translate(text, dest=dest_lang).text
+    except Exception as e:
+        logger.exception("Translation failed")
+        st.error(f"Translation error: {e}")
+        return ""
 
 def create_pdf(transcript, summary, translation):
     pdf = FPDF()
@@ -84,11 +106,13 @@ def create_pdf(transcript, summary, translation):
     pdf.multi_cell(0, 10, f"🧾 Transcript:\n{transcript}\n", align='L')
     pdf.multi_cell(0, 10, f"📌 Summary:\n{summary}\n", align='L')
     pdf.multi_cell(0, 10, f"🌐 Translation:\n{translation}\n", align='L')
-    pdf.output("analysis.pdf")
-    with open("analysis.pdf", "rb") as f:
+    pdf.output("/tmp/analysis.pdf")
+    with open("/tmp/analysis.pdf", "rb") as f:
         st.download_button("⬇️ Download PDF Report", f, file_name="analysis.pdf", mime="application/pdf")
 
+# User input
 url = st.text_input("📥 Paste a YouTube URL")
+
 if st.button("Analyze Video") and url:
     try:
         with st.spinner("📥 Downloading video..."):
@@ -98,10 +122,10 @@ if st.button("Analyze Video") and url:
             if not extract_audio():
                 st.stop()
 
-        with st.spinner("📝 Transcribing with Whisper..."):
-            transcript = transcribe_audio_whisper()
+        with st.spinner("📝 Transcribing using OpenAI Whisper..."):
+            transcript = transcribe_audio_openai()
             if not transcript:
-                st.warning("No transcription returned.")
+                st.warning("Transcription returned empty.")
                 st.stop()
 
         st.subheader("🧾 Transcript")
@@ -126,7 +150,7 @@ if st.button("Analyze Video") and url:
             st.success("Saved to favorites!")
 
     except Exception as e:
-        logger.exception("Processing error")
+        logger.exception("Unexpected app error")
         st.error(f"Error: {e}")
 
 if st.session_state.favorites:
