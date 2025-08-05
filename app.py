@@ -8,6 +8,11 @@ from fpdf import FPDF
 from googletrans import Translator
 from dotenv import load_dotenv
 from mimetypes import guess_type
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -72,6 +77,7 @@ def extract_audio():
             return False
         return True
     except Exception as e:
+        logger.exception("Audio extraction failed")
         st.error(f"Audio extraction error: {e}")
         return False
 
@@ -87,8 +93,11 @@ def transcribe_audio(language_code="en"):
                 data=data
             )
 
-        st.write("Upload status:", upload_response.status_code)
-        st.json(upload_response.json())
+        logger.debug("Upload status code: %s", upload_response.status_code)
+        try:
+            logger.debug("Upload response: %s", upload_response.json())
+        except:
+            logger.warning("Upload response not in JSON format")
 
         if upload_response.status_code != 200:
             st.error(f"Upload failed: {upload_response.text}")
@@ -99,15 +108,23 @@ def transcribe_audio(language_code="en"):
             st.error("Upload URL not found in response.")
             return ""
 
-        json_payload = {"audio_url": upload_url, "language_code": language_code}
+        json_payload = {
+            "audio_url": upload_url,
+            "language_code": language_code,
+            "auto_chapters": False
+        }
+
         transcript_response = requests.post(
             "https://api.assemblyai.com/v2/transcript",
             headers={"authorization": ASSEMBLYAI_API_KEY, "content-type": "application/json"},
             json=json_payload
         )
 
-        st.write("Transcription request status:", transcript_response.status_code)
-        st.json(transcript_response.json())
+        logger.debug("Transcription request status: %s", transcript_response.status_code)
+        try:
+            logger.debug("Transcript response: %s", transcript_response.json())
+        except:
+            logger.warning("Transcript response not in JSON format")
 
         if transcript_response.status_code != 200:
             st.error(f"Transcription request failed: {transcript_response.text}")
@@ -121,8 +138,8 @@ def transcribe_audio(language_code="en"):
                 headers=headers
             )
             result = poll_response.json()
-            st.write("Polling status:", result.get("status"))
-            status = result["status"]
+            logger.debug("Polling result: %s", result)
+            status = result.get("status", "error")
             time.sleep(3)
 
         if status == "completed":
@@ -132,6 +149,7 @@ def transcribe_audio(language_code="en"):
             st.json(result)
             return ""
     except Exception as e:
+        logger.exception("Transcription error")
         st.error(f"Transcription error: {e}")
         return ""
 
@@ -192,6 +210,7 @@ if st.button("Analyze Video") and url:
             st.success("Saved to favorites!")
 
     except Exception as e:
+        logger.exception("Processing error")
         st.error(f"Error: {e}")
 
 if st.session_state.favorites:
