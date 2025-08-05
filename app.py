@@ -1,162 +1,482 @@
 import streamlit as st
-from pytube import YouTube
 import os
-from pydub import AudioSegment
-import openai
-from fpdf import FPDF
-from googletrans import Translator
-from dotenv import load_dotenv
-from mimetypes import guess_type
+import tempfile
 import logging
+from datetime import datetime
+import json
+import re
+from typing import Dict, List, Optional, Tuple
 
-# Setup logging
-logging.basicConfig(level=logging.DEBUG)
+# Third-party imports
+try:
+    import pytube
+    from pytube import YouTube
+except ImportError:
+    st.error("Please install pytube: pip install pytube")
+    st.stop()
+
+try:
+    from pydub import AudioSegment
+    from pydub.utils import which
+except ImportError:
+    st.error("Please install pydub: pip install pydub")
+    st.stop()
+
+try:
+    import openai
+except ImportError:
+    st.error("Please install openai: pip install openai")
+    st.stop()
+
+try:
+    from googletrans import Translator
+except ImportError:
+    st.error("Please install googletrans: pip install googletrans==4.0.0rc1")
+    st.stop()
+
+try:
+    from fpdf import FPDF
+except ImportError:
+    st.error("Please install fpdf2: pip install fpdf2")
+    st.stop()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-load_dotenv()
-openai.api_key = st.secrets["OPENAI_API_KEY"]
-
-st.set_page_config(page_title="Video Insights App")
-st.title("🎥 Video Insights Analyzer")
-
-# Session state
-if "favorites" not in st.session_state:
-    st.session_state.favorites = []
-
-TRANSLATION_LANGUAGES = {
-    "Greek": "el",
-    "English": "en",
-    "French": "fr",
-    "Spanish": "es",
-    "German": "de",
-    "Hindi": "hi",
-    "Chinese": "zh-cn",
-    "Russian": "ru",
-    "Dutch": "nl",
-    "Arabic": "ar"
+# Supported languages for translation
+SUPPORTED_LANGUAGES = {
+    'Greek': 'el',
+    'English': 'en',
+    'French': 'fr',
+    'Spanish': 'es',
+    'German': 'de',
+    'Hindi': 'hi',
+    'Chinese (Simplified)': 'zh-cn',
+    'Russian': 'ru',
+    'Dutch': 'nl',
+    'Arabic': 'ar'
 }
 
-translate_lang = st.selectbox("🌍 Target translation language", list(TRANSLATION_LANGUAGES.keys()))
-translate_lang_code = TRANSLATION_LANGUAGES[translate_lang]
+class VideoProcessor:
+    def __init__(self):
+        self.translator = Translator()
+        
+    def validate_url(self, url: str) -> Tuple[bool, str]:
+        """Validate if the URL is from supported platforms"""
+        youtube_pattern = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/'
+        instagram_pattern = r'(https?://)?(www\.)?instagram\.com/'
+        facebook_pattern = r'(https?://)?(www\.)?facebook\.com/'
+        tiktok_pattern = r'(https?://)?(www\.)?tiktok\.com/'
+        
+        if re.search(youtube_pattern, url, re.IGNORECASE):
+            return True, "youtube"
+        elif re.search(instagram_pattern, url, re.IGNORECASE):
+            return False, "Instagram downloads not supported in this demo (requires different API)"
+        elif re.search(facebook_pattern, url, re.IGNORECASE):
+            return False, "Facebook downloads not supported in this demo (requires different API)"
+        elif re.search(tiktok_pattern, url, re.IGNORECASE):
+            return False, "TikTok downloads not supported in this demo (requires different API)"
+        else:
+            return False, "Unsupported URL format"
+    
+    def download_youtube_audio(self, url: str, output_path: str) -> Tuple[bool, str, Dict]:
+        """Download YouTube video and extract audio"""
+        try:
+            logger.info(f"Downloading YouTube video: {url}")
+            
+            # Create YouTube object
+            yt = YouTube(url)
+            
+            # Get video info
+            video_info = {
+                'title': yt.title,
+                'length': yt.length,
+                'views': yt.views,
+                'author': yt.author
+            }
+            
+            # Get the best audio stream
+            audio_stream = yt.streams.filter(only_audio=True).first()
+            
+            if not audio_stream:
+                return False, "No audio stream available", {}
+            
+            # Download audio
+            temp_file = audio_stream.download(output_path=output_path)
+            
+            # Convert to MP3 using pydub
+            audio = AudioSegment.from_file(temp_file)
+            mp3_file = os.path.join(output_path, "audio.mp3")
+            audio.export(mp3_file, format="mp3")
+            
+            # Clean up original file
+            if os.path.exists(temp_file) and temp_file != mp3_file:
+                os.remove(temp_file)
+            
+            logger.info(f"Audio successfully extracted to: {mp3_file}")
+            return True, mp3_file, video_info
+            
+        except Exception as e:
+            logger.error(f"Error downloading YouTube video: {str(e)}")
+            return False, f"Download failed: {str(e)}", {}
+    
+    def transcribe_audio(self, audio_path: str, openai_api_key: str) -> Tuple[bool, str]:
+        """Transcribe audio using OpenAI Whisper"""
+        try:
+            logger.info(f"Transcribing audio: {audio_path}")
+            
+            # Set OpenAI API key
+            openai.api_key = openai_api_key
+            
+            # Open and transcribe audio file
+            with open(audio_path, "rb") as audio_file:
+                transcript = openai.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file,
+                    response_format="text"
+                )
+            
+            logger.info("Transcription completed successfully")
+            return True, transcript
+            
+        except Exception as e:
+            logger.error(f"Error transcribing audio: {str(e)}")
+            return False, f"Transcription failed: {str(e)}"
+    
+    def create_summary(self, text: str, max_length: int = 300) -> str:
+        """Create a simple summary by taking first N characters"""
+        if len(text) <= max_length:
+            return text
+        
+        # Find the last complete sentence within the limit
+        truncated = text[:max_length]
+        last_period = truncated.rfind('.')
+        last_exclamation = truncated.rfind('!')
+        last_question = truncated.rfind('?')
+        
+        last_sentence_end = max(last_period, last_exclamation, last_question)
+        
+        if last_sentence_end > 0:
+            return text[:last_sentence_end + 1]
+        else:
+            return text[:max_length] + "..."
+    
+    def translate_text(self, text: str, target_language: str) -> Tuple[bool, str]:
+        """Translate text to target language"""
+        try:
+            logger.info(f"Translating text to: {target_language}")
+            
+            # Skip translation if target language is English and text appears to be English
+            if target_language == 'en':
+                detected = self.translator.detect(text)
+                if detected.lang == 'en':
+                    return True, text
+            
+            result = self.translator.translate(text, dest=target_language)
+            logger.info("Translation completed successfully")
+            return True, result.text
+            
+        except Exception as e:
+            logger.error(f"Error translating text: {str(e)}")
+            return False, f"Translation failed: {str(e)}"
+    
+    def generate_pdf_report(self, data: Dict, output_path: str) -> Tuple[bool, str]:
+        """Generate PDF report with all processed data"""
+        try:
+            logger.info("Generating PDF report")
+            
+            class PDF(FPDF):
+                def header(self):
+                    self.set_font('Arial', 'B', 15)
+                    self.cell(0, 10, 'Video Content Analysis Report', 0, 1, 'C')
+                    self.ln(10)
+                
+                def footer(self):
+                    self.set_y(-15)
+                    self.set_font('Arial', 'I', 8)
+                    self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+            
+            pdf = PDF()
+            pdf.add_page()
+            pdf.set_font("Arial", size=12)
+            
+            # Video Information
+            pdf.set_font("Arial", 'B', 14)
+            pdf.cell(0, 10, "Video Information", 0, 1)
+            pdf.set_font("Arial", size=10)
+            
+            if 'video_info' in data and data['video_info']:
+                info = data['video_info']
+                pdf.cell(0, 8, f"Title: {info.get('title', 'N/A')}", 0, 1)
+                pdf.cell(0, 8, f"Author: {info.get('author', 'N/A')}", 0, 1)
+                pdf.cell(0, 8, f"Duration: {info.get('length', 'N/A')} seconds", 0, 1)
+                pdf.cell(0, 8, f"Views: {info.get('views', 'N/A')}", 0, 1)
+            
+            pdf.ln(5)
+            
+            # Summary
+            pdf.set_font("Arial", 'B', 14)
+            pdf.cell(0, 10, "Summary", 0, 1)
+            pdf.set_font("Arial", size=10)
+            
+            summary_text = data.get('summary', 'No summary available')
+            # Handle Unicode characters
+            try:
+                pdf.multi_cell(0, 8, summary_text.encode('latin-1', 'replace').decode('latin-1'))
+            except:
+                pdf.multi_cell(0, 8, "Summary contains special characters that cannot be displayed in PDF")
+            
+            pdf.ln(5)
+            
+            # Translation
+            if 'translation' in data and data['translation']:
+                pdf.set_font("Arial", 'B', 14)
+                pdf.cell(0, 10, f"Translation ({data.get('target_language', 'Unknown')})", 0, 1)
+                pdf.set_font("Arial", size=10)
+                
+                try:
+                    pdf.multi_cell(0, 8, data['translation'].encode('latin-1', 'replace').decode('latin-1'))
+                except:
+                    pdf.multi_cell(0, 8, "Translation contains special characters that cannot be displayed in PDF")
+                
+                pdf.ln(5)
+            
+            # Full Transcript
+            pdf.add_page()
+            pdf.set_font("Arial", 'B', 14)
+            pdf.cell(0, 10, "Full Transcript", 0, 1)
+            pdf.set_font("Arial", size=9)
+            
+            transcript_text = data.get('transcript', 'No transcript available')
+            try:
+                pdf.multi_cell(0, 6, transcript_text.encode('latin-1', 'replace').decode('latin-1'))
+            except:
+                pdf.multi_cell(0, 6, "Transcript contains special characters that cannot be displayed in PDF")
+            
+            # Save PDF
+            pdf_path = os.path.join(output_path, f"video_analysis_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
+            pdf.output(pdf_path)
+            
+            logger.info(f"PDF report generated: {pdf_path}")
+            return True, pdf_path
+            
+        except Exception as e:
+            logger.error(f"Error generating PDF: {str(e)}")
+            return False, f"PDF generation failed: {str(e)}"
 
-# File paths for temp usage
-VIDEO_PATH = "/tmp/video.mp4"
-AUDIO_PATH = "/tmp/audio.mp3"
-
-def download_video(url):
-    yt = YouTube(url)
-    stream = yt.streams.filter(file_extension='mp4').get_highest_resolution()
-    stream.download(filename=VIDEO_PATH)
-
-def extract_audio():
-    try:
-        audio = AudioSegment.from_file(VIDEO_PATH)
-        audio.export(AUDIO_PATH, format="mp3", codec="libmp3lame")
-
-        if os.path.getsize(AUDIO_PATH) == 0:
-            st.error("Extracted audio file is empty.")
-            return False
-
-        mime_type, _ = guess_type(AUDIO_PATH)
-        if not mime_type or not mime_type.startswith("audio"):
-            st.error("File is not recognized as audio.")
-            return False
-
-        if os.path.getsize(AUDIO_PATH) > 25 * 1024 * 1024:
-            st.error("Audio file exceeds OpenAI size limit (25MB).")
-            return False
-
-        return True
-    except Exception as e:
-        logger.exception("Audio extraction failed")
-        st.error(f"Audio extraction error: {e}")
-        return False
-
-def transcribe_audio_openai():
-    try:
-        with open(AUDIO_PATH, "rb") as audio_file:
-            transcript = openai.Audio.transcribe("whisper-1", audio_file)
-            return transcript["text"]
-    except openai.error.OpenAIError as e:
-        logger.exception("OpenAI API error")
-        st.error(f"OpenAI error: {e}")
-        return ""
-    except Exception as e:
-        logger.exception("Unexpected transcription error")
-        st.error(f"Unexpected transcription error: {e}")
-        return ""
-
-def summarize_text(text):
-    return text[:300] + "..." if len(text) > 300 else text
-
-def translate_text(text, dest_lang='el'):
-    translator = Translator()
-    try:
-        return translator.translate(text, dest=dest_lang).text
-    except Exception as e:
-        logger.exception("Translation failed")
-        st.error(f"Translation error: {e}")
-        return ""
-
-def create_pdf(transcript, summary, translation):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=12)
-    pdf.multi_cell(0, 10, "📄 Video Report\n", align='L')
-    pdf.multi_cell(0, 10, f"🧾 Transcript:\n{transcript}\n", align='L')
-    pdf.multi_cell(0, 10, f"📌 Summary:\n{summary}\n", align='L')
-    pdf.multi_cell(0, 10, f"🌐 Translation:\n{translation}\n", align='L')
-    pdf.output("/tmp/analysis.pdf")
-    with open("/tmp/analysis.pdf", "rb") as f:
-        st.download_button("⬇️ Download PDF Report", f, file_name="analysis.pdf", mime="application/pdf")
-
-# User input
-url = st.text_input("📥 Paste a YouTube URL")
-
-if st.button("Analyze Video") and url:
-    try:
-        with st.spinner("📥 Downloading video..."):
-            download_video(url)
-
-        with st.spinner("🎧 Extracting audio..."):
-            if not extract_audio():
-                st.stop()
-
-        with st.spinner("📝 Transcribing using OpenAI Whisper..."):
-            transcript = transcribe_audio_openai()
-            if not transcript:
-                st.warning("Transcription returned empty.")
-                st.stop()
-
-        st.subheader("🧾 Transcript")
-        st.write(transcript)
-
-        summary = summarize_text(transcript)
-        st.subheader("📌 Summary")
-        st.write(summary)
-
-        translation = translate_text(transcript, dest_lang=translate_lang_code)
-        st.subheader("🌐 Translation")
-        st.write(translation)
-
-        create_pdf(transcript, summary, translation)
-
-        if st.button("⭐ Save to Favorites"):
-            st.session_state.favorites.append({
-                "url": url,
-                "summary": summary,
-                "translation": translation
-            })
-            st.success("Saved to favorites!")
-
-    except Exception as e:
-        logger.exception("Unexpected app error")
-        st.error(f"Error: {e}")
-
-if st.session_state.favorites:
-    st.subheader("📌 Favorites")
-    for fav in st.session_state.favorites:
-        st.markdown(f"🔗 {fav['url']}")
-        st.markdown(f"📌 {fav['summary']}")
-        st.markdown(f"🌐 {fav['translation']}")
+# Streamlit App
+def main():
+    st.set_page_config(
+        page_title="Video Content Processor",
+        page_icon="🎥",
+        layout="wide"
+    )
+    
+    st.title("🎥 Video Content Processor")
+    st.markdown("Extract, transcribe, summarize, and translate content from YouTube videos")
+    
+    # Initialize session state
+    if 'favorites' not in st.session_state:
+        st.session_state.favorites = []
+    
+    # Initialize processor
+    processor = VideoProcessor()
+    
+    # Sidebar for settings
+    with st.sidebar:
+        st.header("⚙️ Settings")
+        
+        # OpenAI API Key
+        openai_api_key = st.text_input(
+            "OpenAI API Key",
+            type="password",
+            help="Required for audio transcription using Whisper"
+        )
+        
+        # Language selection
+        target_language = st.selectbox(
+            "Translation Language",
+            options=list(SUPPORTED_LANGUAGES.keys()),
+            index=1  # Default to English
+        )
+        
         st.markdown("---")
+        st.markdown("### 📚 Supported Platforms")
+        st.markdown("- ✅ YouTube")
+        st.markdown("- ❌ Instagram (API required)")
+        st.markdown("- ❌ Facebook (API required)")
+        st.markdown("- ❌ TikTok (API required)")
+    
+    # Main content area
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.header("🔗 Video URL Input")
+        
+        # URL input
+        video_url = st.text_input(
+            "Paste your video URL here:",
+            placeholder="https://www.youtube.com/watch?v=..."
+        )
+        
+        # Process button
+        process_button = st.button("🚀 Process Video", type="primary")
+        
+        if process_button and video_url:
+            if not openai_api_key:
+                st.error("Please provide your OpenAI API key in the sidebar")
+                return
+            
+            # Validate URL
+            is_valid, platform_or_error = processor.validate_url(video_url)
+            
+            if not is_valid:
+                st.error(f"❌ {platform_or_error}")
+                return
+            
+            # Processing steps
+            with st.spinner("Processing video..."):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                # Step 1: Download and extract audio
+                status_text.text("⏬ Downloading video and extracting audio...")
+                progress_bar.progress(20)
+                
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    success, audio_path_or_error, video_info = processor.download_youtube_audio(
+                        video_url, temp_dir
+                    )
+                    
+                    if not success:
+                        st.error(f"❌ {audio_path_or_error}")
+                        return
+                    
+                    # Step 2: Transcribe audio
+                    status_text.text("🎤 Transcribing audio...")
+                    progress_bar.progress(40)
+                    
+                    success, transcript_or_error = processor.transcribe_audio(
+                        audio_path_or_error, openai_api_key
+                    )
+                    
+                    if not success:
+                        st.error(f"❌ {transcript_or_error}")
+                        return
+                    
+                    # Step 3: Create summary
+                    status_text.text("📝 Creating summary...")
+                    progress_bar.progress(60)
+                    
+                    summary = processor.create_summary(transcript_or_error)
+                    
+                    # Step 4: Translate content
+                    status_text.text("🌐 Translating content...")
+                    progress_bar.progress(80)
+                    
+                    target_lang_code = SUPPORTED_LANGUAGES[target_language]
+                    success, translation_or_error = processor.translate_text(
+                        transcript_or_error, target_lang_code
+                    )
+                    
+                    if not success:
+                        st.warning(f"⚠️ Translation failed: {translation_or_error}")
+                        translation_or_error = "Translation not available"
+                    
+                    # Step 5: Generate PDF
+                    status_text.text("📄 Generating PDF report...")
+                    progress_bar.progress(90)
+                    
+                    report_data = {
+                        'video_info': video_info,
+                        'transcript': transcript_or_error,
+                        'summary': summary,
+                        'translation': translation_or_error if success else None,
+                        'target_language': target_language
+                    }
+                    
+                    pdf_success, pdf_path_or_error = processor.generate_pdf_report(
+                        report_data, temp_dir
+                    )
+                    
+                    progress_bar.progress(100)
+                    status_text.text("✅ Processing complete!")
+                    
+                    # Display results
+                    st.success("🎉 Video processed successfully!")
+                    
+                    # Video Information
+                    if video_info:
+                        st.subheader("📹 Video Information")
+                        info_col1, info_col2 = st.columns(2)
+                        with info_col1:
+                            st.write(f"**Title:** {video_info.get('title', 'N/A')}")
+                            st.write(f"**Author:** {video_info.get('author', 'N/A')}")
+                        with info_col2:
+                            st.write(f"**Duration:** {video_info.get('length', 'N/A')} seconds")
+                            st.write(f"**Views:** {video_info.get('views', 'N/A'):,}")
+                    
+                    # Summary
+                    st.subheader("📝 Summary")
+                    st.write(summary)
+                    
+                    # Translation
+                    if success and translation_or_error:
+                        st.subheader(f"🌐 Translation ({target_language})")
+                        st.write(translation_or_error)
+                    
+                    # Full Transcript
+                    with st.expander("📄 Full Transcript", expanded=False):
+                        st.text_area("Transcript", transcript_or_error, height=300)
+                    
+                    # PDF Download
+                    if pdf_success:
+                        with open(pdf_path_or_error, "rb") as pdf_file:
+                            st.download_button(
+                                label="📥 Download PDF Report",
+                                data=pdf_file.read(),
+                                file_name=f"video_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                                mime="application/pdf"
+                            )
+                    else:
+                        st.error(f"❌ PDF generation failed: {pdf_path_or_error}")
+                    
+                    # Save to favorites
+                    if st.button("⭐ Save to Favorites"):
+                        favorite_item = {
+                            'url': video_url,
+                            'title': video_info.get('title', 'Untitled'),
+                            'summary': summary,
+                            'translation': translation_or_error if success else None,
+                            'target_language': target_language,
+                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        }
+                        st.session_state.favorites.append(favorite_item)
+                        st.success("✅ Added to favorites!")
+    
+    with col2:
+        st.header("⭐ Favorites")
+        
+        if st.session_state.favorites:
+            for i, favorite in enumerate(reversed(st.session_state.favorites)):
+                with st.expander(f"📹 {favorite['title'][:30]}...", expanded=False):
+                    st.write(f"**URL:** {favorite['url']}")
+                    st.write(f"**Added:** {favorite['timestamp']}")
+                    st.write(f"**Summary:** {favorite['summary'][:100]}...")
+                    if favorite['translation']:
+                        st.write(f"**Translation ({favorite['target_language']}):** {favorite['translation'][:100]}...")
+                    
+                    if st.button(f"🗑️ Remove", key=f"remove_{len(st.session_state.favorites)-1-i}"):
+                        st.session_state.favorites.pop(len(st.session_state.favorites)-1-i)
+                        st.rerun()
+        else:
+            st.info("No favorites saved yet. Process a video and save it to favorites!")
+        
+        # Clear all favorites
+        if st.session_state.favorites and st.button("🗑️ Clear All Favorites"):
+            st.session_state.favorites = []
+            st.rerun()
+
+if __name__ == "__main__":
+    main()
