@@ -1,20 +1,19 @@
 import streamlit as st
 from pytube import YouTube
 from pydub import AudioSegment
-import os
-import openai
 from fpdf import FPDF
 from googletrans import Translator
 from dotenv import load_dotenv
+import openai
+import os
 import logging
+from mimetypes import guess_type
 
-# Load environment
-load_dotenv()
-openai.api_key = st.secrets["OPENAI_API_KEY"]
-
-# Configure logging
+# Setup
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+load_dotenv()
+openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 st.set_page_config(page_title="Video Insights App")
 st.title("🎥 Video Insights Analyzer")
@@ -47,19 +46,26 @@ def extract_audio():
     try:
         audio = AudioSegment.from_file("video.mp4")
         audio.export("audio.mp3", format="mp3")
-        return os.path.getsize("audio.mp3") > 0
+        if os.path.getsize("audio.mp3") == 0:
+            st.error("Audio file is empty after extraction.")
+            return False
+        mime_type, _ = guess_type("audio.mp3")
+        if not mime_type or not mime_type.startswith("audio"):
+            st.error("Extracted file is not valid audio.")
+            return False
+        return True
     except Exception as e:
         logger.exception("Audio extraction failed")
         st.error(f"Audio extraction error: {e}")
         return False
 
-def transcribe_with_whisper():
+def transcribe_audio_whisper():
     try:
         with open("audio.mp3", "rb") as f:
             transcript = openai.Audio.transcribe("whisper-1", f)
         return transcript["text"]
     except Exception as e:
-        logger.exception("Whisper transcription failed")
+        logger.exception("Transcription failed")
         st.error(f"Transcription error: {e}")
         return ""
 
@@ -93,7 +99,7 @@ if st.button("Analyze Video") and url:
                 st.stop()
 
         with st.spinner("📝 Transcribing with Whisper..."):
-            transcript = transcribe_with_whisper()
+            transcript = transcribe_audio_whisper()
             if not transcript:
                 st.warning("No transcription returned.")
                 st.stop()
