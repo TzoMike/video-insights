@@ -86,18 +86,18 @@ def transcribe_audio(language_code="en"):
         headers = {"authorization": ASSEMBLYAI_API_KEY}
 
         with open("audio.mp3", "rb") as f:
-            data = f.read()
+            files = {'file': ('audio.mp3', f, 'audio/mpeg')}
             upload_response = requests.post(
                 "https://api.assemblyai.com/v2/upload",
-                headers=headers,
-                data=data
+                headers={"authorization": ASSEMBLYAI_API_KEY},
+                files=files
             )
 
         logger.debug("Upload status code: %s", upload_response.status_code)
         try:
             logger.debug("Upload response: %s", upload_response.json())
-        except:
-            logger.warning("Upload response not in JSON format")
+        except Exception:
+            logger.warning("Upload response is not JSON.")
 
         if upload_response.status_code != 200:
             st.error(f"Upload failed: {upload_response.text}")
@@ -116,15 +116,18 @@ def transcribe_audio(language_code="en"):
 
         transcript_response = requests.post(
             "https://api.assemblyai.com/v2/transcript",
-            headers={"authorization": ASSEMBLYAI_API_KEY, "content-type": "application/json"},
+            headers={
+                "authorization": ASSEMBLYAI_API_KEY,
+                "content-type": "application/json"
+            },
             json=json_payload
         )
 
-        logger.debug("Transcription request status: %s", transcript_response.status_code)
+        logger.debug("Transcript status code: %s", transcript_response.status_code)
         try:
             logger.debug("Transcript response: %s", transcript_response.json())
-        except:
-            logger.warning("Transcript response not in JSON format")
+        except Exception:
+            logger.warning("Transcript response is not JSON.")
 
         if transcript_response.status_code != 200:
             st.error(f"Transcription request failed: {transcript_response.text}")
@@ -148,6 +151,7 @@ def transcribe_audio(language_code="en"):
             st.error("Transcription failed:")
             st.json(result)
             return ""
+
     except Exception as e:
         logger.exception("Transcription error")
         st.error(f"Transcription error: {e}")
