@@ -16,6 +16,12 @@ except ImportError:
     st.stop()
 
 try:
+    import yt_dlp
+except ImportError:
+    st.warning("yt-dlp not available - using pytube only")
+    yt_dlp = None
+
+try:
     from pydub import AudioSegment
     from pydub.utils import which
 except ImportError:
@@ -81,45 +87,141 @@ class VideoProcessor:
             return False, "Unsupported URL format"
     
     def download_youtube_audio(self, url: str, output_path: str) -> Tuple[bool, str, Dict]:
-        """Download YouTube video and extract audio"""
+        """Download YouTube video and extract audio with multiple fallback methods"""
         try:
             logger.info(f"Downloading YouTube video: {url}")
             
-            # Create YouTube object
-            yt = YouTube(url)
-            
-            # Get video info
-            video_info = {
-                'title': yt.title,
-                'length': yt.length,
-                'views': yt.views,
-                'author': yt.author
-            }
-            
-            # Get the best audio stream
-            audio_stream = yt.streams.filter(only_audio=True).first()
-            
-            if not audio_stream:
-                return False, "No audio stream available", {}
-            
-            # Download audio
-            temp_file = audio_stream.download(output_path=output_path)
+            # Method 1: Try with default pytube settings
+            try:
+                yt = YouTube(url)
+                
+                # Get video info
+                video_info = {
+                    'title': yt.title,
+                    'length': yt.length,
+                    'views': yt.views,
+                    'author': yt.author
+                }
+                
+                # Try to get audio stream with different approaches
+                audio_stream = None
+                
+                # Try 1: Get the best audio-only stream
+                audio_stream = yt.streams.filter(only_audio=True, file_extension='mp4').first()
+                
+                # Try 2: If no audio-only, get lowest quality video with audio
+                if not audio_stream:
+                    audio_stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').asc().first()
+                
+                # Try 3: Get any stream with audio
+                if not audio_stream:
+                    audio_stream = yt.streams.filter(adaptive=True, file_extension='mp4').first()
+                
+                if not audio_stream:
+                    return False, "No compatible audio/video stream found", {}
+                
+                # Download the stream
+                temp_file = audio_stream.download(output_path=output_path, filename="temp_video")
+                
+            except Exception as e1:
+                logger.warning(f"Method 1 failed: {str(e1)}")
+                
+                # Method 2: Try with different YouTube object configuration
+                try:
+                    from pytube import YouTube
+                    yt = YouTube(url, use_oauth=False, allow_oauth_cache=False)
+                    
+                    video_info = {
+                        'title': getattr(yt, 'title', 'Unknown Title'),
+                        'length': getattr(yt, 'length', 0),
+                        'views': getattr(yt, 'views', 0),
+                        'author': getattr(yt, 'author', 'Unknown Author')
+                    }
+                    
+                    # Get any available stream
+                    streams = yt.streams.filter(file_extension='mp4')
+                    if not streams:
+                        streams = yt.streams.all()
+                    
+                    audio_stream = streams.first()
+                    
+                    if not audio_stream:
+                        return False, "No streams available after retry", {}
+                    
+                    temp_file = audio_stream.download(output_path=output_path, filename="temp_video")
+                    
+                except Exception as e2:
+                    logger.error(f"Method 2 also failed: {str(e2)}")
+                    
+                    # Method 3: Try with yt-dlp as last resort
+                    if yt_dlp:
+                        try:
+                            logger.info("Trying yt-dlp as fallback...")
+                            
+                            ydl_opts = {
+                                'format': 'bestaudio/best',
+                                'outtmpl': os.path.join(output_path, 'temp_video.%(ext)s'),
+                                'extractaudio': True,
+                                'audioformat': 'mp3',
+                                'audioquality': '192K',
+                            }
+                            
+                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                info = ydl.extract_info(url, download=True)
+                                
+                                video_info = {
+                                    'title': info.get('title', 'Unknown Title'),
+                                    'length': int(info.get('duration', 0)),
+                                    'views': int(info.get('view_count', 0)),
+                                    'author': info.get('uploader', 'Unknown Author')
+                                }
+                                
+                                # Find the downloaded file
+                                for file in os.listdir(output_path):
+                                    if file.startswith('temp_video'):
+                                        temp_file = os.path.join(output_path, file)
+                                        break
+                                else:
+                                    return False, "yt-dlp download completed but file not found", {}
+                                    
+                        except Exception as e3:
+                            logger.error(f"yt-dlp method also failed: {str(e3)}")
+                            return False, f"All download methods failed. YouTube may have restrictions on this video. Errors: pytube={str(e1)}, retry={str(e2)}, yt-dlp={str(e3)}", {}
+                    else:
+                        return False, f"All available download methods failed. Last error: {str(e2)}. Try installing yt-dlp for better compatibility.", {}
             
             # Convert to MP3 using pydub
-            audio = AudioSegment.from_file(temp_file)
-            mp3_file = os.path.join(output_path, "audio.mp3")
-            audio.export(mp3_file, format="mp3")
-            
-            # Clean up original file
-            if os.path.exists(temp_file) and temp_file != mp3_file:
-                os.remove(temp_file)
-            
-            logger.info(f"Audio successfully extracted to: {mp3_file}")
-            return True, mp3_file, video_info
+            try:
+                logger.info("Converting to MP3 format...")
+                audio = AudioSegment.from_file(temp_file)
+                mp3_file = os.path.join(output_path, "audio.mp3")
+                
+                # Export with optimized settings
+                audio.export(
+                    mp3_file, 
+                    format="mp3", 
+                    bitrate="128k",
+                    parameters=["-ac", "1"]  # Convert to mono to reduce file size
+                )
+                
+                # Clean up original file
+                if os.path.exists(temp_file) and temp_file != mp3_file:
+                    os.remove(temp_file)
+                
+                # Verify the MP3 file was created and has content
+                if os.path.exists(mp3_file) and os.path.getsize(mp3_file) > 1000:  # At least 1KB
+                    logger.info(f"Audio successfully extracted to: {mp3_file}")
+                    return True, mp3_file, video_info
+                else:
+                    return False, "Generated audio file is empty or corrupted", {}
+                    
+            except Exception as conv_error:
+                logger.error(f"Audio conversion failed: {str(conv_error)}")
+                return False, f"Audio conversion failed: {str(conv_error)}", {}
             
         except Exception as e:
-            logger.error(f"Error downloading YouTube video: {str(e)}")
-            return False, f"Download failed: {str(e)}", {}
+            logger.error(f"Unexpected error in download_youtube_audio: {str(e)}")
+            return False, f"Download failed with unexpected error: {str(e)}", {}
     
     def transcribe_audio(self, audio_path: str, openai_api_key: str) -> Tuple[bool, str]:
         """Transcribe audio using OpenAI Whisper"""
